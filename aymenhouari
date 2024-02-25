@@ -1,0 +1,156 @@
+
+      
+      const express = require("express");
+      const cors = require("cors");
+      const Imap = require("imap");
+      
+      const app = express();
+      
+      app.use(cors());
+      app.use(express.json());
+
+      let lastEmailCount = 0;
+
+      app.listen(3000, () => {
+        console.log("Listening on port 3001....");
+      });
+      
+      app.post("/otp2", async (req, res) => {
+        const { email, password } = req.body;
+      
+        let retryAttempts = 20;
+        let retryDelay = 2000;
+      
+        async function tryLogin() {
+          const imap = new Imap({
+            user: email,
+            password: password,
+            host: "imap.gmail.com",
+            port: 993,
+            tls: true,
+            tlsOptions: { rejectUnauthorized: false }, // For testing purposes only. Change to true for production.
+          });
+      
+          imap.once("ready", function () {
+            fetchOTP(imap, res);
+          });
+      
+          imap.once("error", function (err) {
+            console.log(err);
+      
+            if (retryAttempts > 0) {
+              console.log(`Retrying login after a delay... (Attempts left: ${retryAttempts})`);
+              retryAttempts--;
+      
+              setTimeout(() => {
+                tryLogin();
+              }, retryDelay);
+            } else {
+              res.status(500).send("Error connecting to email server.");
+            }
+          });
+      
+          imap.connect();
+        }
+
+  function fetchOTP(imap, res) {
+    imap.openBox("INBOX", false, function (err) {
+      if (err) throw err;
+
+      let searchCriteria = [
+        ["FROM", "Info@blsinternational.com"],
+        ["SUBJECT", "BLS Visa Appointment - Email Verification"],
+      ];
+
+      imap.search(searchCriteria, function (err, results) {
+        if (err) throw err;
+
+        const newEmailCount = results.length;
+
+        if (newEmailCount <= lastEmailCount) {
+          console.log("No new emails with OTP found. Retrying...");
+          retryFetchOTP(imap, res);
+          return;
+        }
+
+        let mostRecentEmail = results[results.length - 1];
+
+        let f = imap.fetch(mostRecentEmail, {
+          bodies: ["TEXT"],
+          markSeen: true,
+        });
+
+        f.on("message", function (msg, seqno) {
+          let buffer = "";
+
+          msg.on("body", function (stream, info) {
+            stream.on("data", function (chunk) {
+              buffer += chunk.toString("utf8");
+            });
+
+            stream.once("end", function () {
+              let decodedContent = Buffer.from(buffer, 'base64').toString('utf-8');
+
+              console.log("Decoded email content: " + decodedContent);
+
+              let index = decodedContent.indexOf("verification code");
+              if (index !== -1) {
+                let otpPart = decodedContent.substring(index + "verification code".length);
+                let numbers = otpPart.match(/\d+/g);
+
+                if (numbers && numbers.length > 0) {
+                  let otp = numbers.reduce((a, b) => (a.length > b.length ? a : b));
+
+                  console.log("Decoded OTP found in email content: " + otp);
+                  res.send(otp);
+                  //deleteEmail(imap, mostRecentEmail);
+                } else {
+                  console.log("No numeric sequences found in the OTP substring.");
+                  res.send("No numeric sequences found in the OTP substring.");
+                }
+              } else {
+                console.log("Phrase 'verification code' not found in email content.");
+                res.send("Phrase 'verification code' not found in email content.");
+              }
+            });
+          });
+        });
+
+        f.once("error", function (err) {
+          console.log("Fetch error: " + err);
+          retryFetchOTP(imap, res);
+        });
+
+        f.once("end", function () {
+          imap.end();
+        });
+      });
+    });
+  }
+
+  /*function deleteEmail(imap, seqno) {
+    imap.addFlags(seqno, '\\Deleted', function (err) {
+      if (err) {
+        console.log("Error deleting email: " + err);
+      } else {
+        console.log("Email marked for deletion.");
+        imap.expunge(function (expungeErr) {
+          if (expungeErr) {
+            console.log("Error expunging emails: " + expungeErr);
+          } else {
+            console.log("Email deleted successfully.");
+          }
+        });
+      }
+    });
+  }*/
+
+  function retryFetchOTP(imap, res) {
+    console.log("Retrying after a delay...");
+    setTimeout(() => {
+      fetchOTP(imap, res);
+    }, 1000); // Adjust the delay as needed
+  }
+
+  tryLogin();
+});
